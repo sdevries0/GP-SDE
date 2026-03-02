@@ -1,0 +1,2 @@
+u_equation,test_drift_mse,test_diffusion_mse
+"[laplacian + u*(0.929 - 0.936*u), 0.0935*u - 0.0117]",0.00047424770309589803,0.00032107013976201415
