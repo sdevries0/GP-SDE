@@ -122,7 +122,7 @@ if __name__ == '__main__':
     df = pd.DataFrame([result])
 
     # Create filename based on experiment parameters
-    filename = f"SDEs/GP_SDE/special/SPDE_2D.csv"
+    filename = f"SDEs/GP_SDE/SPDE_2D.csv"
     filepath = os.path.join("/home/sdevries/results", filename)
 
     # Save to CSV

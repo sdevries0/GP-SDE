@@ -155,13 +155,13 @@ if __name__ == '__main__':
         dt = 0.02
         save_path = f"Rossler"
 
-    elif env_name==vanderPol:
+    elif env_name=="vanderPol":
         noise_level = 0.2
         N_var = 2
         env = VanDerPolOscillator(noise_level)
         T = 50
         dt = 0.02
-        save_path = fvanderPol
+        save_path = f"vdPol"
 
     # Initialize list to collect results
     results = []

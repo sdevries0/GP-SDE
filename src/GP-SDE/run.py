@@ -49,7 +49,7 @@ def validate(solution, grid, target_drift, target_diffusion, tree_evaluator):
     return drift_mse, diffusion_mse
 
 if __name__ == '__main__':
-    batch_size = 8
+    batch_size = 4
 
     env_name = sys.argv[1]
 
@@ -95,7 +95,7 @@ if __name__ == '__main__':
         optimize_constants_elite = 200
         max_nodes = 20
 
-        save_path = f"standard/Lorenz_{N_var}"
+        save_path = f"Lorenz_{N_var}"
 
     elif env_name=="Rossler":
         noise_level = 0.1
@@ -103,17 +103,16 @@ if __name__ == '__main__':
         T = 50
         N_var = 3
         dt = 0.02
-        save_path = f"standard/Rossler"
+        save_path = f"Rossler"
         num_generations = 50
 
-
-    elif env_name==vanderPol:
+    elif env_name=="vanderPol":
         noise_level = 0.2
         env = VanDerPolOscillator(noise_level)
         T = 50
         dt = 0.02
         N_var = 2
-        save_path = f"standard/vdPol"
+        save_path = f"vdPol"
         num_generations = 50
 
 
@@ -134,12 +133,12 @@ if __name__ == '__main__':
     results = []
     times = []
 
-    test_ts, test_ys = generate_data(jr.PRNGKey(101), env, 0.01, T, 16)
+    test_ts, test_ys = generate_data(jr.PRNGKey(101), env, 0.01, T, 4)
     test_grid = test_ys.reshape(test_ys.shape[0] * test_ys.shape[1], test_ys.shape[2])
     test_drift = jax.vmap(lambda x: env.drift(0, x, jnp.array([0])))(test_grid)
     test_diffusion = jax.vmap(lambda x: env.diffusion(0, x, jnp.array([0])))(test_grid)
 
-    for seed in range(10):
+    for seed in range(1):
         key = jr.PRNGKey(seed)
         data_key, val_data_key, gp_key = jr.split(key, 3)
         ts, ys = generate_data(data_key, env, dt, T, batch_size)
@@ -158,8 +157,9 @@ if __name__ == '__main__':
 
         N = 1 if env_name == "Lorenz96" else env.n_var
         
-        for target_dim in range(N):
-            strategy.fit(gp_key, (ys, ts, jnp.array([target_dim])), verbose=0)
+        # for target_dim in range(N):
+        for target_dim in [2]:
+            strategy.fit(gp_key, (ys, ts, jnp.array([target_dim])), verbose=1)
 
             _val_drift = val_drift[:, target_dim]
             _test_drift = test_drift[:, target_dim]

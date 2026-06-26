@@ -45,9 +45,6 @@ if __name__ == '__main__':
     batch_size = 8
 
     env_name = sys.argv[1]
-    if not os.path.exists(env_name):
-        print(f"Environment '{env_name}' not recognized")
-        sys.exit(1)
 
     population_size = 100
     num_populations = 5
@@ -91,7 +88,7 @@ if __name__ == '__main__':
         optimize_constants_elite = 200
         max_nodes = 20
 
-        save_path = f"standard/Lorenz_{N_var}"
+        save_path = f"Lorenz_{N_var}"
 
     elif env_name=="Rossler":
         noise_level = 0.1
@@ -99,16 +96,16 @@ if __name__ == '__main__':
         T = 50
         N_var = 3
         dt = 0.02
-        save_path = f"standard/Rossler"
+        save_path = f"Rossler"
         num_generations = 50
 
-    elif env_name==vanderPol:
+    elif env_name=="vanderPol":
         noise_level = 0.2
         env = VanDerPolOscillator(noise_level)
         T = 50
         dt = 0.02
         N_var = 2
-        save_path = f"standard/vdPol"
+        save_path = f"vdPol"
         num_generations = 50
 
     operator_list = [("+", lambda x, y: jnp.add(x, y), 2, 0.5), 
