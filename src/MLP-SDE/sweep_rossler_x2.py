@@ -10,13 +10,21 @@ import pandas as pd
 import run as mlp_run
 
 
-TARGET_DIM = 2
+DEFAULT_TARGET_DIM = 2
 
 
-def build_train_args(base_args, hidden_size, hidden_layers, drift_lr, diffusion_lr, minibatch_size):
+def build_train_args(
+    base_args,
+    hidden_size,
+    hidden_layers,
+    drift_lr,
+    diffusion_lr,
+    minibatch_size,
+    target_dim,
+):
     return argparse.Namespace(
-        env_name="Rossler",
-        extra="",
+        env_name=base_args.env_name,
+        extra=base_args.extra,
         hidden_size=hidden_size,
         hidden_layers=hidden_layers,
         lr=None,
@@ -29,14 +37,14 @@ def build_train_args(base_args, hidden_size, hidden_layers, drift_lr, diffusion_
         eps=base_args.eps,
         print_every=base_args.print_every,
         num_seeds=base_args.num_seeds,
-        target_dim=TARGET_DIM,
+        target_dim=target_dim,
         output_dir=base_args.output_dir,
     )
 
 
 def evaluate_config(
     base_args, hidden_size, hidden_layers, drift_lr, diffusion_lr, minibatch_size,
-    env, test_grid, test_drift, test_diffusion, seed_data,
+    env, test_grid, test_drift, test_diffusion, seed_data, target_dim,
 ):
     config_args = build_train_args(
         base_args,
@@ -45,13 +53,14 @@ def evaluate_config(
         drift_lr=drift_lr,
         diffusion_lr=diffusion_lr,
         minibatch_size=minibatch_size,
+        target_dim=target_dim,
     )
 
     rows = []
     for seed, (train_ts, train_ys, val_ts, val_ys) in enumerate(seed_data):
         key = jr.PRNGKey(seed)
         _, _, train_key = jr.split(key, 3)
-        dim_key = jr.fold_in(train_key, TARGET_DIM)
+        dim_key = jr.fold_in(train_key, target_dim)
         best_drift_params, best_diffusion_params, data_stats = mlp_run.train_one_seed(
             env,
             train_ys,
@@ -60,7 +69,7 @@ def evaluate_config(
             val_ts,
             config_args,
             dim_key,
-            TARGET_DIM,
+            target_dim,
         )
 
         x_mean, x_std, drift_scale = data_stats
@@ -70,16 +79,16 @@ def evaluate_config(
             lambda x: jnp.exp(mlp_run.mlp_forward(best_diffusion_params, x))
         )(test_grid_norm)[:, 0]
 
-        test_drift_mse = jnp.mean((drift_pred - test_drift[:, TARGET_DIM]) ** 2)
+        test_drift_mse = jnp.mean((drift_pred - test_drift[:, target_dim]) ** 2)
         test_diffusion_mse = jnp.mean(
-            (diffusion_pred - jnp.abs(test_diffusion[:, TARGET_DIM])) ** 2
+            (diffusion_pred - jnp.abs(test_diffusion[:, target_dim])) ** 2
         )
         print(test_drift_mse, test_diffusion_mse)
 
         rows.append(
             {
                 "seed": seed,
-                "target_dim": TARGET_DIM,
+                "target_dim": target_dim,
                 "hidden_size": hidden_size,
                 "hidden_layers": hidden_layers,
                 "drift_lr": drift_lr,
@@ -98,7 +107,28 @@ def evaluate_config(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Hyperparameter sweep for the MLP baseline on Rossler target dim 2"
+        description="Hyperparameter sweep for the MLP baseline"
+    )
+    parser.add_argument(
+        "--env_name",
+        type=str,
+        default="Rossler",
+        choices=["Double well", "Lotka-Volterra", "Lorenz96", "Rossler", "vanderPol"],
+    )
+    parser.add_argument(
+        "--extra",
+        type=str,
+        default="",
+        help=(
+            "Optional experiment argument: diffusion type for Double well, "
+            "dt for Lotka-Volterra, n_var for Lorenz96"
+        ),
+    )
+    parser.add_argument(
+        "--target_dim",
+        type=int,
+        default=DEFAULT_TARGET_DIM,
+        help="Target dimension index. For Double well, use 0.",
     )
     parser.add_argument("--hidden_sizes", type=int, nargs="+", default=[64])
     parser.add_argument("--hidden_layers", type=int, nargs="+", default=[2, 3, 4])
@@ -110,10 +140,23 @@ def main():
     parser.add_argument("--min_sigma", type=float, default=1e-4)
     parser.add_argument("--eps", type=float, default=1e-5)
     parser.add_argument("--print_every", type=int, default=50)
-    parser.add_argument("--num_seeds", type=int, default=10)
+    parser.add_argument("--num_seeds", type=int, default=3)
     parser.add_argument("--output_dir", type=str, default="data/MLP_SDE_sweeps")
     parser.add_argument("--output_name", type=str, default="Rossler_x2_sweep")
     args = parser.parse_args()
+
+    env, dt, horizon, save_stem, num_target_dims = mlp_run.infer_experiment_setup(args.env_name, args.extra)
+    target_dim = args.target_dim
+    if target_dim < 0 or target_dim >= num_target_dims:
+        raise ValueError(
+            f"target_dim must be between 0 and {num_target_dims - 1} for {args.env_name}"
+        )
+
+    if args.output_name == "Rossler_x2_sweep":
+        extra_suffix = f"_{args.extra}" if args.extra else ""
+        output_stem = f"{save_stem}_x{target_dim}_sweep{extra_suffix}"
+    else:
+        output_stem = args.output_name
 
     all_rows = []
     configs = list(
@@ -127,11 +170,10 @@ def main():
     )
 
     os.makedirs(args.output_dir, exist_ok=True)
-    detail_path = os.path.join(args.output_dir, f"{args.output_name}_detail.csv")
+    detail_path = os.path.join(args.output_dir, f"{output_stem}_detail.csv")
 
     # Hoist env, test data, and per-seed train/val data outside the config loop
     # so they are generated once rather than once per config.
-    env, dt, horizon, _, _ = mlp_run.infer_experiment_setup("Rossler", "")
     test_ts, test_ys = mlp_run.generate_data(jr.PRNGKey(101), env, 0.01, horizon, 16)
     test_grid = test_ys.reshape(-1, test_ys.shape[-1])
     test_drift = jax.vmap(lambda x: env.drift(0.0, x, jnp.array([0.0])))(test_grid)
@@ -145,7 +187,7 @@ def main():
         val_ts, val_ys = mlp_run.generate_data(val_key, env, dt, horizon, 8)
         seed_data.append((train_ts, train_ys, val_ts, val_ys))
 
-    print(f"Running {len(configs)} configurations for Rossler target dim {TARGET_DIM}")
+    print(f"Running {len(configs)} configurations for {args.env_name} target dim {target_dim}")
     for config_index, (hidden_size, hidden_layers, drift_lr, diffusion_lr, minibatch_size) in enumerate(configs, start=1):
         print(
             f"\n[{config_index}/{len(configs)}] hidden_size={hidden_size}, "
@@ -165,6 +207,7 @@ def main():
             test_drift=test_drift,
             test_diffusion=test_diffusion,
             seed_data=seed_data,
+            target_dim=target_dim,
         )
         all_rows.extend(config_rows)
 
@@ -194,7 +237,7 @@ def main():
         .sort_values("mean_score")
     )
 
-    summary_path = os.path.join(args.output_dir, f"{args.output_name}_summary.csv")
+    summary_path = os.path.join(args.output_dir, f"{output_stem}_summary.csv")
     df.to_csv(detail_path, index=False)
     summary_df.to_csv(summary_path, index=False)
 

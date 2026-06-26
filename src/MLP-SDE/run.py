@@ -184,7 +184,7 @@ def train_one_seed(env, train_ys, train_ts, val_ys, val_ts, args, key, target_di
 
     def make_optimizer(peak_lr):
         schedule = optax.warmup_cosine_decay_schedule(
-            init_value=peak_lr * 0.005,
+            init_value=peak_lr * 0.01,
             peak_value=peak_lr,
             warmup_steps=warmup_steps,
             decay_steps=total_steps,
@@ -320,7 +320,7 @@ def run_experiment(args):
             test_grid_norm = (test_grid - x_mean) / x_std
             drift_pred = jax.vmap(lambda x: mlp_forward(best_drift_params, x))(test_grid_norm)[:, 0] * float(drift_scale)
             diffusion_pred = jax.vmap(
-                lambda x: (mlp_forward(best_diffusion_params, x))
+                lambda x: jnp.exp(mlp_forward(best_diffusion_params, x))
             )(test_grid_norm)[:, 0]
 
             test_drift_mse = jnp.mean((drift_pred - test_drift[:, target_dim]) ** 2)
@@ -368,18 +368,18 @@ if __name__ == "__main__":
     )
 
     parser.add_argument("--hidden_size", type=int, default=64)
-    parser.add_argument("--hidden_layers", type=int, default=2)
+    parser.add_argument("--hidden_layers", type=int, default=5)
     parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--drift_lr", type=float, default=1e-4)
-    parser.add_argument("--diffusion_lr", type=float, default=1e-5)
+    parser.add_argument("--drift_lr", type=float, default=5e-3)
+    parser.add_argument("--diffusion_lr", type=float, default=1e-4)
     parser.add_argument("--epochs", type=int, default=5000)
     parser.add_argument("--minibatch_size", type=int, default=512)
-    parser.add_argument("--patience", type=int, default=1000)
+    parser.add_argument("--patience", type=int, default=1500)
 
     parser.add_argument("--eps", type=float, default=1e-5)
 
     parser.add_argument("--print_every", type=int, default=100)
-    parser.add_argument("--num_seeds", type=int, default=1)
+    parser.add_argument("--num_seeds", type=int, default=10)
     parser.add_argument("--target_dim", type=int, default=None)
     parser.add_argument("--output_dir", type=str, default="data/MLP_SDE")
 
