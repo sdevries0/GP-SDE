@@ -99,31 +99,24 @@ def train_step(
     drift_opt_state,
     diffusion_opt_state,
     batch,
-    drift_optimizer,        # static (arg 5)
-    diffusion_optimizer,    # static (arg 6)
+    drift_optimizer,
+    diffusion_optimizer,
     eps,
-    target_dim,             # static (arg 8)
-    drift_scale
+    target_dim,
+    drift_scale,
 ):
     def loss_fn(d_params, s_params):
         return nll_loss(d_params, s_params, batch, eps=eps, target_dim=target_dim, drift_scale=drift_scale)
 
-    loss, grads = jax.value_and_grad(loss_fn, argnums=(0, 1))(drift_params, diffusion_params)
-    drift_grads, diffusion_grads = grads
+    loss, (drift_grads, diffusion_grads) = jax.value_and_grad(loss_fn, argnums=(0, 1))(drift_params, diffusion_params)
 
-    drift_updates, drift_opt_state = drift_optimizer.update(drift_grads, drift_opt_state, drift_params)
-    diffusion_updates, diffusion_opt_state = diffusion_optimizer.update(diffusion_grads, diffusion_opt_state, diffusion_params)
+    drift_updates, new_drift_opt_state = drift_optimizer.update(drift_grads, drift_opt_state, drift_params)
+    diffusion_updates, new_diff_opt_state = diffusion_optimizer.update(diffusion_grads, diffusion_opt_state, diffusion_params)
 
-    drift_params = optax.apply_updates(drift_params, drift_updates)
-    diffusion_params = optax.apply_updates(diffusion_params, diffusion_updates)
+    new_drift_params = optax.apply_updates(drift_params, drift_updates)
+    new_diff_params = optax.apply_updates(diffusion_params, diffusion_updates)
 
-    return (
-        drift_params,
-        diffusion_params,
-        drift_opt_state,
-        diffusion_opt_state,
-        loss,
-    )
+    return new_drift_params, new_diff_params, new_drift_opt_state, new_diff_opt_state, loss
 
 
 def diffusion_diag_at_grid(env, grid: jnp.ndarray) -> jnp.ndarray:
@@ -172,7 +165,6 @@ def train_one_seed(env, train_ys, train_ts, val_ys, val_ts, args, key, target_di
     # val_transitions   = normalize(val_transitions)
 
     n_var = int(train_ys.shape[-1])
-    # Output dim is 1: each model predicts the scalar drift/diffusion for one state dimension
     drift_params = init_mlp_params(init_drift_key, n_var, 1, args.hidden_size, args.hidden_layers)
     diffusion_params = init_mlp_params(init_diff_key, n_var, 1, args.hidden_size, args.hidden_layers)
 
@@ -180,9 +172,15 @@ def train_one_seed(env, train_ys, train_ts, val_ys, val_ts, args, key, target_di
     diffusion_lr = args.diffusion_lr if args.diffusion_lr is not None else args.lr
 
     n_train = train_transitions["x_t"].shape[0]
-    steps_per_epoch = max(1, n_train // args.minibatch_size)
-    total_steps = args.epochs * steps_per_epoch
+    n_steps_per_epoch = max(1, n_train // args.minibatch_size)
+    n_usable = n_steps_per_epoch * args.minibatch_size
+    total_steps = args.epochs * n_steps_per_epoch
     warmup_steps = 500
+
+    # Pre-batch data into [n_steps_per_epoch, minibatch_size, dim] for scan
+    x_t_batched   = train_transitions["x_t"][:n_usable].reshape(n_steps_per_epoch, args.minibatch_size, -1)
+    x_tp1_batched = train_transitions["x_tp1"][:n_usable].reshape(n_steps_per_epoch, args.minibatch_size, -1)
+    dt_batched    = train_transitions["dt"][:n_usable].reshape(n_steps_per_epoch, args.minibatch_size, 1)
 
     def make_optimizer(peak_lr):
         schedule = optax.warmup_cosine_decay_schedule(
@@ -199,57 +197,41 @@ def train_one_seed(env, train_ys, train_ts, val_ys, val_ts, args, key, target_di
     drift_opt_state = drift_optimizer.init(drift_params)
     diffusion_opt_state = diffusion_optimizer.init(diffusion_params)
 
-    train_step_jit = jax.jit(train_step, static_argnums=(5, 6, 8))
+    def scan_step(carry, batch):
+        drift_p, diff_p, drift_os, diff_os = carry
+        drift_p, diff_p, drift_os, diff_os, loss = train_step(
+            drift_p, diff_p, drift_os, diff_os, batch,
+            drift_optimizer, diffusion_optimizer,
+            args.eps, target_dim, drift_scale,
+        )
+        return (drift_p, diff_p, drift_os, diff_os), loss
+
+    # JIT-compile once: runs all minibatch steps of one epoch on the GPU without Python re-entry
+    one_epoch_fn = jax.jit(lambda carry, batches: jax.lax.scan(scan_step, carry, batches))
 
     best_val_nll = jnp.inf
     best_drift_params = drift_params
     best_diffusion_params = diffusion_params
     patience_counter = 0
+    carry = (drift_params, diffusion_params, drift_opt_state, diffusion_opt_state)
 
     for epoch in range(1, args.epochs + 1):
+        # Shuffle batch order at the Python level before each epoch
         shuffle_key, perm_key = jr.split(shuffle_key)
-        perm = jr.permutation(perm_key, n_train)
+        perm = jr.permutation(perm_key, n_steps_per_epoch)
+        batches = {
+            "x_t":   x_t_batched[perm],
+            "x_tp1": x_tp1_batched[perm],
+            "dt":    dt_batched[perm],
+        }
 
-        epoch_losses = []
-        for start in range(0, n_train, args.minibatch_size):
-            idx = perm[start : start + args.minibatch_size]
-            batch = {
-                "x_t": train_transitions["x_t"][idx],
-                "x_tp1": train_transitions["x_tp1"][idx],
-                "dt": train_transitions["dt"][idx],
-            }
+        carry, _ = one_epoch_fn(carry, batches)
+        drift_params, diffusion_params = carry[0], carry[1]
 
-            (
-                drift_params,
-                diffusion_params,
-                drift_opt_state,
-                diffusion_opt_state,
-                batch_loss,
-            ) = train_step_jit(
-                drift_params,
-                diffusion_params,
-                drift_opt_state,
-                diffusion_opt_state,
-                batch,
-                drift_optimizer,
-                diffusion_optimizer,
-                args.eps,
-                target_dim,
-                drift_scale
-            )
-            epoch_losses.append(batch_loss)
-
-        train_nll = float(jnp.mean(jnp.asarray(epoch_losses)))
-        val_nll = float(
-            nll_loss(
-                drift_params,
-                diffusion_params,
-                val_transitions,
-                eps=args.eps,
-                target_dim=target_dim,
-                drift_scale=drift_scale
-            )
-        )
+        val_nll = float(nll_loss(
+            drift_params, diffusion_params, val_transitions,
+            eps=args.eps, target_dim=target_dim, drift_scale=drift_scale,
+        ))
 
         if val_nll < best_val_nll:
             best_val_nll = val_nll
@@ -259,15 +241,8 @@ def train_one_seed(env, train_ys, train_ts, val_ys, val_ts, args, key, target_di
         else:
             patience_counter += 1
 
-        # if epoch == 1 or epoch % args.print_every == 0:
-        #     print(
-        #         f"Epoch {epoch:4d} | train NLL: {train_nll:.6f} | "
-        #         f"val NLL: {val_nll:.6f} | best val NLL: {float(best_val_nll):.6f}"
-        #     )
-
-        # if patience_counter >= args.patience:
-        #     print(f"Early stopping at epoch {epoch} (patience={args.patience})")
-        #     break
+        if patience_counter >= args.patience:
+            break
 
     return best_drift_params, best_diffusion_params, (x_mean, x_std, drift_scale)
 
@@ -323,7 +298,7 @@ def run_experiment(args):
 
     results = []
     for seed in range(args.num_seeds):
-        print(seed+4)
+        print(seed)
         key = jr.PRNGKey(seed)
         data_key, val_key, train_key = jr.split(key, 3)
         train_ts, train_ys = generate_data(data_key, env, dt, horizon, 8)

@@ -34,14 +34,10 @@ def build_train_args(base_args, hidden_size, hidden_layers, drift_lr, diffusion_
     )
 
 
-def evaluate_config(base_args, hidden_size, hidden_layers, drift_lr, diffusion_lr, minibatch_size):
-    env, dt, horizon, _, _ = mlp_run.infer_experiment_setup("Rossler", "")
-
-    test_ts, test_ys = mlp_run.generate_data(jr.PRNGKey(101), env, 0.01, horizon, 16)
-    test_grid = test_ys.reshape(-1, test_ys.shape[-1])
-    test_drift = jax.vmap(lambda x: env.drift(0.0, x, jnp.array([0.0])))(test_grid)
-    test_diffusion = mlp_run.diffusion_diag_at_grid(env, test_grid)
-
+def evaluate_config(
+    base_args, hidden_size, hidden_layers, drift_lr, diffusion_lr, minibatch_size,
+    env, test_grid, test_drift, test_diffusion, seed_data,
+):
     config_args = build_train_args(
         base_args,
         hidden_size=hidden_size,
@@ -52,12 +48,9 @@ def evaluate_config(base_args, hidden_size, hidden_layers, drift_lr, diffusion_l
     )
 
     rows = []
-    for seed in range(base_args.num_seeds):
+    for seed, (train_ts, train_ys, val_ts, val_ys) in enumerate(seed_data):
         key = jr.PRNGKey(seed)
-        data_key, val_key, train_key = jr.split(key, 3)
-        train_ts, train_ys = mlp_run.generate_data(data_key, env, dt, horizon, 8)
-        val_ts, val_ys = mlp_run.generate_data(val_key, env, dt, horizon, 8)
-
+        _, _, train_key = jr.split(key, 3)
         dim_key = jr.fold_in(train_key, TARGET_DIM)
         best_drift_params, best_diffusion_params, data_stats = mlp_run.train_one_seed(
             env,
@@ -136,6 +129,22 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
     detail_path = os.path.join(args.output_dir, f"{args.output_name}_detail.csv")
 
+    # Hoist env, test data, and per-seed train/val data outside the config loop
+    # so they are generated once rather than once per config.
+    env, dt, horizon, _, _ = mlp_run.infer_experiment_setup("Rossler", "")
+    test_ts, test_ys = mlp_run.generate_data(jr.PRNGKey(101), env, 0.01, horizon, 16)
+    test_grid = test_ys.reshape(-1, test_ys.shape[-1])
+    test_drift = jax.vmap(lambda x: env.drift(0.0, x, jnp.array([0.0])))(test_grid)
+    test_diffusion = mlp_run.diffusion_diag_at_grid(env, test_grid)
+
+    seed_data = []
+    for seed in range(args.num_seeds):
+        key = jr.PRNGKey(seed)
+        data_key, val_key, _ = jr.split(key, 3)
+        train_ts, train_ys = mlp_run.generate_data(data_key, env, dt, horizon, 8)
+        val_ts, val_ys = mlp_run.generate_data(val_key, env, dt, horizon, 8)
+        seed_data.append((train_ts, train_ys, val_ts, val_ys))
+
     print(f"Running {len(configs)} configurations for Rossler target dim {TARGET_DIM}")
     for config_index, (hidden_size, hidden_layers, drift_lr, diffusion_lr, minibatch_size) in enumerate(configs, start=1):
         print(
@@ -151,6 +160,11 @@ def main():
             drift_lr=drift_lr,
             diffusion_lr=diffusion_lr,
             minibatch_size=minibatch_size,
+            env=env,
+            test_grid=test_grid,
+            test_drift=test_drift,
+            test_diffusion=test_diffusion,
+            seed_data=seed_data,
         )
         all_rows.extend(config_rows)
 
