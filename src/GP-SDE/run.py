@@ -1,5 +1,7 @@
 import sys
 import os
+os.environ["XLA_FLAGS"] = '--xla_force_host_platform_device_count=10'
+import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import jax
@@ -67,7 +69,7 @@ if __name__ == '__main__':
         T = 50
         num_generations = 50
 
-        save_path = f"DW_{diffusion_name}"
+        save_path = f"DW_{diffusion_name}_noise"
 
     elif env_name=="Lotka-Volterra":
         noise_level = 0.2
@@ -127,7 +129,7 @@ if __name__ == '__main__':
 
     strategy = GeneticProgramming(fitness_function=fitness_function, num_generations=num_generations, population_size=population_size, operator_list=operator_list, variable_list=variable_list, 
                                 num_populations = num_populations, layer_sizes=layer_sizes, complexity_objective=True, constant_optimization_method="gradient", constant_optimization_steps=15, 
-                                optimize_constants_elite=optimize_constants_elite, max_init_depth=5, constant_step_size_init=0.1, device_type="gpu", max_nodes=max_nodes)
+                                optimize_constants_elite=optimize_constants_elite, max_init_depth=5, constant_step_size_init=0.1, device_type="cpu", max_nodes=max_nodes)
 
     # Initialize list to collect results
     results = []
@@ -138,7 +140,7 @@ if __name__ == '__main__':
     test_drift = jax.vmap(lambda x: env.drift(0, x, jnp.array([0])))(test_grid)
     test_diffusion = jax.vmap(lambda x: env.diffusion(0, x, jnp.array([0])))(test_grid)
 
-    for seed in range(1):
+    for seed in range(10):
         key = jr.PRNGKey(seed)
         data_key, val_data_key, gp_key = jr.split(key, 3)
         ts, ys = generate_data(data_key, env, dt, T, batch_size)
@@ -159,7 +161,7 @@ if __name__ == '__main__':
         
         # for target_dim in range(N):
         for target_dim in [2]:
-            strategy.fit(gp_key, (ys, ts, jnp.array([target_dim])), verbose=1)
+            strategy.fit(gp_key, (ys, ts, jnp.array([target_dim])), verbose=0)
 
             _val_drift = val_drift[:, target_dim]
             _test_drift = test_drift[:, target_dim]

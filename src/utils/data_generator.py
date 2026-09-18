@@ -31,7 +31,7 @@ def simulate(env, init_state, ts, process_noise_key):
     return ys
 
 def generate_data(key, env, dt, T, batch_size):
-    key, init_key, p1_key, ts_key = jr.split(key, 4)
+    key, init_key, p1_key, obs_key = jr.split(key, 4)
 
     ts = jnp.tile(jnp.arange(0, T, dt), (batch_size, 1))
 
@@ -39,5 +39,7 @@ def generate_data(key, env, dt, T, batch_size):
     process_noise_keys = jr.split(p1_key, batch_size)
 
     ys = jax.vmap(simulate, in_axes=(None, 0, 0, 0))(env, init_states, ts, process_noise_keys)
+
+    obs_noise = 0.01 + jr.normal(obs_key, ys.shape)
 
     return ts, ys
