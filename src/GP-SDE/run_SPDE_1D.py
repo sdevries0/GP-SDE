@@ -1,5 +1,6 @@
 import sys
-sys.path.insert(1, '../')
+import os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import jax
 import jax.numpy as jnp
 import jax.random as jr
@@ -52,6 +53,33 @@ def vmap_PDE(candidate, us, du_dx, d2u_dx2, tree_evaluator):
 
     return vmap_time(us, du_dx, d2u_dx2)
 
+
+def compute_nll_for_solution_spde(solution, u_t, u_tp1, dt, tree_evaluator):
+    """
+    Compute total negative log-likelihood for SPDE solution on temporal increments.
+
+    u_t, u_tp1: arrays shape (n_traj, n_time, nx)
+    Predictions use local spatial derivatives computed from u_t via solver.
+    """
+    # compute spatial derivatives on u_t
+    # d2u_dx2 and du_dx shapes (n_traj, n_time, nx)
+    d2u_dx2 = (jnp.roll(u_t, 1, axis=2) - 2 * u_t + jnp.roll(u_t, -1, axis=2)) * solver.dx2_inv
+    du_dx = (jnp.roll(u_t, -1, axis=2) - jnp.roll(u_t, 1, axis=2)) / (2 * solver.dx)
+
+    # Evaluate model predictions on u_t grid per trajectory
+    # vmap_PDE expects inputs of shape (time, nx); map it over trajectories
+    preds = jax.vmap(lambda u, dudx, d2udx: vmap_PDE(solution, u, dudx, d2udx, tree_evaluator))(u_t, du_dx, d2u_dx2)
+    # preds shape: (n_traj, n_time, nx, 2)
+    f_pred = preds[..., 0]
+    sigma_pred = preds[..., 1]
+
+    var = (sigma_pred ** 2) * dt + 1e-5
+
+    residual = (u_tp1 - u_t) - f_pred * dt
+    nll = 0.5 * (jnp.log(2 * jnp.pi * var) + (residual ** 2) / var)
+    total_nll = jnp.sum(nll)
+    return total_nll
+
 if __name__ == '__main__':
     # Generate synthetic 1D data
     # Initialize 1D solver
@@ -88,18 +116,28 @@ if __name__ == '__main__':
 
     strategy = GeneticProgramming(fitness_function=fitness_function, num_generations=num_generations, population_size=population_size, operator_list=operator_list, variable_list=variable_list, 
                                 num_populations = num_populations, layer_sizes=layer_sizes, complexity_objective=True, constant_optimization_method="gradient", constant_optimization_steps=15, 
-                                optimize_constants_elite=optimize_constants_elite, max_init_depth=5, constant_step_size_init=0.1, device_type="gpu", max_nodes=max_nodes)
+                                optimize_constants_elite=optimize_constants_elite, max_init_depth=5, constant_step_size_init=0.1, device_type="gpu", max_nodes=max_nodes, punish_duplicates=False)
 
     strategy.fit(gp_key, (data), verbose=5)
 
-    # Evaluate pareto front
-    pareto_front = strategy.pareto_front[1]
-    drift_mses, diffusion_mses = jax.vmap(validate, in_axes=[0,None,None,None,None])(
-        pareto_front, _u[0], target_drift, target_diffusion, strategy.tree_evaluator
-    )
+    u_all, x_all, t_all = data
+    u_t  = u_all[:, :-1, :]   # shape (n_traj, time_len-1, nx)
+    u_tp1 = u_all[:, 1:, :]
 
-    best_idx = jnp.argmin(drift_mses + diffusion_mses)
+    # compute NLLs for whole pareto front (vectorized)
+    pareto_front = strategy.pareto_front[1]
+    nlls = jax.vmap(lambda s: compute_nll_for_solution_spde(s, u_t, u_tp1, dt, strategy.tree_evaluator))(pareto_front)
+
+    # combine with complexity (node-count) to form MDL and select best
+    complexities = jax.vmap(lambda s: jnp.sum(s[:,:,0] != 0))(pareto_front)
+    mdl_scores = complexities * jnp.log(len(strategy.node_function_list)-1) + nlls
+
+    best_idx = jnp.argmin(mdl_scores)
     best_solution = pareto_front[best_idx]
+
+    drift_mses, diffusion_mses = validate(
+            best_solution, _u[0], target_drift, target_diffusion, strategy.tree_evaluator
+        )
 
     # Get the equation strings for drift and diffusion
     full_equation = strategy.expression_to_string(best_solution)
@@ -116,8 +154,8 @@ if __name__ == '__main__':
     df = pd.DataFrame([result])
 
     # Create filename based on experiment parameters
-    filename = f"SDEs/GP_SDE/SPDE_1D.csv"
-    filepath = os.path.join("/home/sdevries/results", filename)
+    filename = f"GP_SDE/SPDE_1D.csv"
+    filepath = os.path.join("GP-SDE/data/", filename)
 
     # Save to CSV
     df.to_csv(filepath, index=False)

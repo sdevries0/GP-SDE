@@ -478,7 +478,7 @@ class Lorenz96(EnvironmentBase):
 class SPDE_2D:
     """JAX-based 1D SPDE solver using finite differences"""
     
-    def __init__(self, nx: int, ny: int, Lx: float, Ly: float, dt: float, true_system: bool):
+    def __init__(self, nx: int, ny: int, Lx: float, Ly: float, dt: float, true_system: bool = True):
         self.nx, self.ny = nx, ny
         self.Lx, self.Ly = Lx, Ly
         self.dx = Lx / (nx - 1)
@@ -590,7 +590,7 @@ class SPDE_2D:
 class SPDE_1D:
     """JAX-based 1D SPDE solver using finite differences"""
     
-    def __init__(self, nx: int, Lx: float, dt: float, true_system: bool):
+    def __init__(self, nx: int, Lx: float, dt: float, true_system: bool = True):
         self.nx = nx
         self.Lx = Lx
         self.dx = Lx / nx  # Periodic domain

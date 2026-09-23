@@ -187,8 +187,11 @@ def make_equation(coef, names):
 
     return equation
 
-def eval_drift_param(target_dim, degree, train_ys, train_ts, val_grid, val_targets, num_bins=5, alpha=0.01, threshold=0.01, min_bin_size=5):    
-    """Train on train_ys/train_ts and evaluate on eval_ys"""
+def eval_drift_param(target_dim, degree, train_ys, train_ts, val_grid=None, val_targets=None, num_bins=5, alpha=0.01, threshold=0.01, min_bin_size=5):    
+    """Train on train_ys/train_ts and evaluate on eval_ys (validation optional).
+
+    If `val_grid` and `val_targets` are not provided, returns training MSE on the KM coefficients used for fitting.
+    """
     # Compute KM coefficients on training data
     drift_coefficients, _, grid_points = kramers_moyal_coefficients_multidim(
         train_ys, train_ts, num_bins=num_bins, target_dim=target_dim, min_bin_size=min_bin_size)
@@ -202,16 +205,25 @@ def eval_drift_param(target_dim, degree, train_ys, train_ts, val_grid, val_targe
     # Apply Lasso regression for drift only (trained on training data)
     lasso_drift, lasso_drift_features, drift_names = sequential_lasso_selection(drift_library, y_drift, drift_names, alpha=alpha, threshold=threshold)
     
-    # Evaluate on provided evaluation dataset
-    library, _ = make_library(val_grid, degree)
-    library = library[:, lasso_drift_features]
-    preds = lasso_drift.predict(library)
-    val_mse = jnp.mean((val_targets - preds) ** 2)
+    # Evaluate on provided evaluation dataset if given, otherwise report training MSE
+    if val_grid is not None and val_targets is not None:
+        library, _ = make_library(val_grid, degree)
+        library = library[:, lasso_drift_features]
+        preds = lasso_drift.predict(library)
+        val_mse = jnp.mean((val_targets - preds) ** 2)
+    else:
+        # compute training MSE on KM-derived training targets
+        train_library = drift_library[:, lasso_drift_features]
+        preds = lasso_drift.predict(train_library)
+        val_mse = jnp.mean((y_drift - preds) ** 2)
 
     return val_mse, make_equation(lasso_drift.coef_, drift_names), lasso_drift, lasso_drift_features
 
-def eval_diffusion_param(target_dim, degree, train_ys, train_ts, val_grid, val_targets, num_bins=5, alpha=0.01, threshold=0.01, min_bin_size=5):    
-    """Train on train_ys/train_ts and evaluate on eval_ys"""
+def eval_diffusion_param(target_dim, degree, train_ys, train_ts, val_grid=None, val_targets=None, num_bins=5, alpha=0.01, threshold=0.01, min_bin_size=5):    
+    """Train on train_ys/train_ts and evaluate on eval_ys (validation optional).
+
+    If `val_grid` and `val_targets` are not provided, returns training MSE on the KM-derived diffusion coefficients.
+    """
     # Compute KM coefficients on training data
     _, diffusion_coefficients, grid_points = kramers_moyal_coefficients_multidim(
         train_ys, train_ts, num_bins=num_bins, target_dim=target_dim, min_bin_size=min_bin_size)
@@ -224,10 +236,15 @@ def eval_diffusion_param(target_dim, degree, train_ys, train_ts, val_grid, val_t
     # Apply Lasso regression for diffusion only (trained on training data)
     lasso_diffusion, lasso_diffusion_features, diffusion_names = sequential_lasso_selection(diffusion_library, y_diffusion, diffusion_names, alpha=alpha, threshold=threshold)
     
-    # Evaluate on provided evaluation dataset
-    library, _ = make_library(val_grid, degree, absolute=True)
-    library = library[:, lasso_diffusion_features]
-    preds = jnp.abs(lasso_diffusion.predict(library))
-    val_mse = jnp.mean((val_targets - preds) ** 2)
+    # Evaluate on provided evaluation dataset if given, otherwise report training MSE
+    if val_grid is not None and val_targets is not None:
+        library, _ = make_library(val_grid, degree, absolute=True)
+        library = library[:, lasso_diffusion_features]
+        preds = jnp.abs(lasso_diffusion.predict(library))
+        val_mse = jnp.mean((val_targets - preds) ** 2)
+    else:
+        train_library = diffusion_library[:, lasso_diffusion_features]
+        preds = jnp.abs(lasso_diffusion.predict(train_library))
+        val_mse = jnp.mean((y_diffusion - preds) ** 2)
 
     return val_mse, make_equation(lasso_diffusion.coef_, diffusion_names), lasso_diffusion, lasso_diffusion_features

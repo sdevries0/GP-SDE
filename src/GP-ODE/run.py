@@ -41,6 +41,41 @@ def validate(solution, grid, target_drift, tree_evaluator):
         
     return drift_mse
 
+def compute_mse_for_solution(solution, x_t_grid, dx_grid, dt, tree_evaluator, target_dim=0):
+    """
+    Compute negative log-likelihood of observed increments dx_grid under model defined by solution.
+
+    Assumes univariate target_dim: dx ≈ f(x)*dt + sigma(x)*sqrt(dt)*ξ
+    NLL per point: 0.5*(log(2π var) + residual^2/var)
+    where var = sigma(x)^2 * dt (plus small floor to avoid zero)
+    """
+    # Evaluate model at states x_t_grid
+    preds = jax.vmap(lambda x: tree_evaluator(solution, x))(x_t_grid)
+    f_pred = preds[:, 0]
+
+    residual = dx_grid[:, target_dim] - f_pred * dt
+    mse = (residual ** 2)
+    # Return mean squared error (per-sample)
+    mean_mse = jnp.mean(mse)
+    return mean_mse
+
+
+def compute_nll_for_solution(solution, x_t_grid, dx_grid, dt, tree_evaluator, target_dim=0, min_var=1e-12):
+    """
+    Estimate Gaussian negative log-likelihood for a candidate by estimating residual variance from data.
+
+    NLL = 0.5 * N * (log(2π σ^2) + 1)  where σ^2 = mean(residual^2)
+    Returns scalar NLL.
+    """
+    preds = jax.vmap(lambda x: tree_evaluator(solution, x))(x_t_grid)
+    f_pred = preds[:, 0]
+    residual = dx_grid[:, target_dim] - f_pred * dt
+    sigma2 = jnp.mean(residual ** 2)
+    sigma2 = jnp.clip(sigma2, min=min_var)
+    N = residual.shape[0]
+    nll = 0.5 * N * (jnp.log(2 * jnp.pi * sigma2) + 1.0)
+    return nll
+
 if __name__ == '__main__':
     batch_size = 8
 
@@ -50,6 +85,7 @@ if __name__ == '__main__':
     num_populations = 5
     optimize_constants_elite = 100
     max_nodes = 15
+    obs_noise = float(sys.argv[3]) if len(sys.argv)>3 else 0.0
 
     if env_name=="Double well":
         noise_level = 0.5
@@ -68,9 +104,11 @@ if __name__ == '__main__':
         T = 50
         num_generations = 50
         N_var = 2
-        dt = jnp.float32(sys.argv[2]) if len(sys.argv) > 2 else 0.02
+        dt = sys.argv[2] if len(sys.argv) > 2 else 0.02
 
         save_path = f"LV_{dt}"
+
+        dt = jnp.float32(dt)
 
     elif env_name=="Lorenz96":
         noise_level = 0.2
@@ -108,9 +146,9 @@ if __name__ == '__main__':
         save_path = f"vdPol"
         num_generations = 50
 
-    operator_list = [("+", lambda x, y: jnp.add(x, y), 2, 0.5), 
-                    ("*", lambda x, y: jnp.multiply(x, y), 2, 0.5),
-                    ]
+    operator_list = [{"string": "+", "fn": lambda x, y: jnp.add(x, y), "arity": 2, "prob": 0.5},
+                    {"string": "*", "fn": lambda x, y: jnp.multiply(x, y), "arity": 2, "prob": 0.5}
+                     ]
 
     variable_list = [["x" + str(i) for i in range(env.n_var)]]
 
@@ -118,8 +156,8 @@ if __name__ == '__main__':
     layer_sizes = jnp.array([1])
 
     strategy = GeneticProgramming(fitness_function=fitness_function, num_generations=num_generations, population_size=population_size, operator_list=operator_list, variable_list=variable_list, 
-                                num_populations = num_populations, layer_sizes=layer_sizes, complexity_objective=True, constant_optimization_method="gradient", constant_optimization_steps=15, 
-                                optimize_constants_elite=optimize_constants_elite, max_init_depth=5, constant_step_size_init=0.1, device_type="gpu", max_nodes=max_nodes)
+                                num_populations = num_populations, layer_sizes=layer_sizes, complexity_objective=True, constant_optimization=True, constant_optimization_steps=15, 
+                                optimize_constants_elite=optimize_constants_elite, max_init_depth=5, constant_step_size=0.1, device_type="gpu", max_nodes=max_nodes, punish_duplicates=False)
 
     # Initialize list to collect results
     results = []
@@ -131,14 +169,8 @@ if __name__ == '__main__':
 
     for seed in range(10):
         key = jr.PRNGKey(seed)
-        data_key, val_data_key, gp_key = jr.split(key, 3)
-        ts, ys = generate_data(data_key, env, dt, T, batch_size)
-
-        val_ts, val_ys = generate_data(val_data_key, env, dt, T, batch_size)
-
-        val_grid = val_ys.reshape(val_ys.shape[0] * val_ys.shape[1], val_ys.shape[2])
-
-        val_drift = jax.vmap(lambda x: env.drift(0, x, jnp.array([0])))(val_grid)
+        data_key, gp_key = jr.split(key)
+        ts, ys = generate_data(data_key, env, dt, T, batch_size, obs_sigma=obs_noise)
 
         # Initialize result dictionary for this seed
         seed_result = {
@@ -147,20 +179,34 @@ if __name__ == '__main__':
         
         N = 1 if env_name == "Lorenz96" else env.n_var
         
-        for target_dim in range(10):
+        for target_dim in range(N):
 
             strategy.fit(gp_key, (ys, ts, jnp.array([target_dim])), verbose=0)
 
-            _val_drift = val_drift[:, target_dim]
             _test_drift = test_drift[:, target_dim]
 
             # Evaluate pareto front
             pareto_front = strategy.pareto_front[1]
-            drift_mses = jax.vmap(validate, in_axes=[0,None,None,None])(
-                pareto_front, val_grid, _val_drift, strategy.tree_evaluator
+                        
+            # Compute complexity for each pareto solution (node count)
+            complexities = jax.vmap(lambda s: jnp.sum(s[:,:,0] != 0))(pareto_front)
+
+            # Prepare training increments: x_t and dx = x_{t+1}-x_t
+            x_t = ys[:, :-1, :]
+            x_tp1 = ys[:, 1:, :]
+            dx = x_tp1 - x_t
+
+            x_t_grid_inc = x_t.reshape(x_t.shape[0] * x_t.shape[1], x_t.shape[2])
+            dx_grid_inc = dx.reshape(dx.shape[0] * dx.shape[1], dx.shape[2])
+
+            # Compute NLL for each pareto solution on training increments using estimated residual variance
+            nlls = jax.vmap(lambda s: compute_nll_for_solution(s, x_t_grid_inc, dx_grid_inc, dt, strategy.tree_evaluator, target_dim))(
+                pareto_front
             )
 
-            best_idx = jnp.argmin(drift_mses)
+            mdl_scores = complexities * jnp.log(len(strategy.node_function_list)-1) + nlls
+
+            best_idx = int(jnp.argmin(mdl_scores))
             best_solution = pareto_front[best_idx]
 
             test_drift_mse = validate(best_solution, test_grid, _test_drift, strategy.tree_evaluator)
@@ -181,7 +227,7 @@ if __name__ == '__main__':
     df = pd.DataFrame(results)
 
     # Create filename based on experiment parameters
-    filename = f"data/GP_ODE/{save_path}.csv"
+    filename = f"GP-SDE/data/GP_ODE/{save_path}.csv"
 
     # Save to CSV
     df.to_csv(filename, index=False)

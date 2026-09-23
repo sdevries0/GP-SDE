@@ -40,11 +40,42 @@ def validate(solution, grid, target_drift, tree_evaluator):
         
     return drift_mse
 
+def compute_nll_for_solution(solution, x_t_grid, dx_grid, dt, tree_evaluator, n_substeps=1, min_var=1e-12):
+    """
+    Compute Gaussian negative log-likelihood for a candidate by simulating multi-step
+    Euler transitions (n_substeps) and estimating residual variance from the prediction errors.
+
+    Returns scalar NLL (sum over all residual entries).
+    """
+    sub_dt = dt / n_substeps
+    steps = jnp.arange(int(n_substeps))
+
+    def simulate_transition(y_current, _):
+        tree_out = tree_evaluator(solution, y_current)
+        y_next = y_current + tree_out * sub_dt
+        return y_next, y_next
+
+    def residual_single(y_start, dx_row):
+        y_end = y_start + dx_row
+        y_pred, _ = jax.lax.scan(simulate_transition, y_start, steps)
+        residual = (y_end - y_pred)
+        return residual
+
+    # Vectorize across all transitions -> residuals shape (N_samples, dim)
+    residuals = jax.vmap(residual_single)(x_t_grid, dx_grid)
+    residuals_flat = residuals.reshape(-1)
+    N_total = residuals_flat.shape[0]
+    sigma2 = jnp.mean(residuals_flat ** 2)
+    sigma2 = jnp.clip(sigma2, min=min_var)
+    # Gaussian NLL for isotropic residuals
+    nll = 0.5 * N_total * (jnp.log(2 * jnp.pi * sigma2) + 1.0)
+    return nll
+
 if __name__ == '__main__':
     batch_size = 8
 
     env_name = sys.argv[1]
-    dt = jnp.float32(sys.argv[2]) if len(sys.argv) > 2 else 0.2
+    dt = sys.argv[2] if len(sys.argv) > 2 else 0.2
 
     T = 50
     noise_level = 0.2
@@ -52,13 +83,13 @@ if __name__ == '__main__':
     env = LotkaVolterra(noise_level)
 
     population_size = 200
-    num_populations = 10 + 5 * (dt==0.5)
+    num_populations = 10 + 5 * (jnp.float32(dt)==0.5)
     num_generations = 100
 
-    operator_list = [("+", lambda x, y: jnp.add(x, y), 2, 0.5), 
-                    ("*", lambda x, y: jnp.multiply(x, y), 2, 0.5),
-                    ]
-
+    operator_list = [{"string": "+", "fn": lambda x, y: jnp.add(x, y), "arity": 2, "prob": 0.5},
+                    {"string": "*", "fn": lambda x, y: jnp.multiply(x, y), "arity": 2, "prob": 0.5}
+                     ]
+    
     variable_list = [["x" + str(i) for i in range(env.n_var)]]
 
     n_substeps = 5
@@ -67,8 +98,8 @@ if __name__ == '__main__':
     layer_sizes = jnp.array([env.n_var])
 
     strategy = GeneticProgramming(fitness_function=fitness_function, num_generations=num_generations, population_size=population_size, operator_list=operator_list, variable_list=variable_list, 
-                                num_populations = num_populations, layer_sizes=layer_sizes, complexity_objective=True, constant_optimization_method="gradient", constant_optimization_steps=50, 
-                                optimize_constants_elite=500, max_init_depth=5, constant_step_size_init=0.1, device_type="cpu", reproduction_probability_factors=(0.2, 1.0))
+                                num_populations = num_populations, layer_sizes=layer_sizes, complexity_objective=True, constant_optimization=True, constant_optimization_steps=50, 
+                                optimize_constants_elite=500, max_init_depth=5, constant_step_size=0.1, device_type="cpu", reproduction_probability_factors=(0.2, 1.0), punish_duplicates=False)
 
     results = []
 
@@ -82,29 +113,35 @@ if __name__ == '__main__':
         }
 
         key = jr.PRNGKey(seed)
-        data_key, val_data_key, gp_key = jr.split(key, 3)
-        ts, ys = generate_data(data_key, env, dt, T, batch_size)
+        data_key, gp_key = jr.split(key)
+        ts, ys = generate_data(data_key, env, jnp.float32(dt), T, batch_size)
 
-        strategy.fit(gp_key, (ys, ts), verbose=10)
+        strategy.fit(gp_key, (ys, ts), verbose=0)
 
-        val_ts, val_ys = generate_data(val_data_key, env, dt, T, batch_size)
-
-        val_grid = val_ys.reshape(val_ys.shape[0] * val_ys.shape[1], val_ys.shape[2])
-
-        val_drift = jax.vmap(lambda x: env.drift(0, x, jnp.array([0])))(val_grid)
-
-        # Evaluate pareto front
+        # Evaluate pareto front and select by MDL (complexity + NLL on training increments)
         pareto_front = strategy.pareto_front[1]
-        drift_mses = jax.vmap(validate, in_axes=[0,None,None,None])(
-                pareto_front, val_grid, val_drift, strategy.tree_evaluator
-            )
 
-        best_idx = jnp.argmin(drift_mses)
+        complexities = jax.vmap(lambda s: jnp.sum(s[:,:,0] != 0))(pareto_front)
+
+        # Prepare training increments: x_t and dx = x_{t+1}-x_t
+        x_t = ys[:, :-1, :]
+        x_tp1 = ys[:, 1:, :]
+        dx = x_tp1 - x_t
+        x_t_grid_inc = x_t.reshape(x_t.shape[0] * x_t.shape[1], x_t.shape[2])
+        dx_grid_inc = dx.reshape(dx.shape[0] * dx.shape[1], dx.shape[2])
+
+        mses = jax.vmap(lambda s: compute_nll_for_solution(s, x_t_grid_inc, dx_grid_inc, jnp.float32(dt), strategy.tree_evaluator, n_substeps))(
+            pareto_front
+        )
+
+        mdl_scores = complexities * jnp.log(len(strategy.node_function_list)-1) + mses
+
+        best_idx = int(jnp.argmin(mdl_scores))
         best_solution = pareto_front[best_idx]
         full_equation = strategy.expression_to_string(best_solution)
 
-        test_drift_mse = validate(best_solution, test_grid, test_drift, strategy.tree_evaluator)    
-        print(f"Best diffusion (validation): equation = {full_equation}, drift MSE = {test_drift_mse}")
+        test_drift_mse = validate(best_solution, test_grid, test_drift, strategy.tree_evaluator)
+        print(f"Selected by MDL: equation = {full_equation}, drift MSE = {test_drift_mse}")
 
         seed_result[f'equations'] = full_equation
         seed_result[f'test_drift_mse'] = float(test_drift_mse)
@@ -115,7 +152,7 @@ if __name__ == '__main__':
     df = pd.DataFrame(results)
 
     # Create filename based on experiment parameters
-    filename = f"data/GP_ODE/LV_MS_{dt}.csv"
+    filename = f"GP-SDE/data/GP_ODE/LV_MS_{dt}.csv"
 
     # Save to CSV
     df.to_csv(filename, index=False)
