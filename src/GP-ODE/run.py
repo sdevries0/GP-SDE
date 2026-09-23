@@ -85,7 +85,7 @@ if __name__ == '__main__':
     num_populations = 5
     optimize_constants_elite = 100
     max_nodes = 15
-    obs_noise = float(sys.argv[3]) if len(sys.argv)>3 else 0.0
+    obs_noise = sys.argv[3] if len(sys.argv)>3 else 0.0
 
     if env_name=="Double well":
         noise_level = 0.5
@@ -97,6 +97,10 @@ if __name__ == '__main__':
         num_generations = 50
 
         save_path = f"DW_{diffusion_name}"
+
+        if float(obs_noise)>0.0:
+            save_path = f"noise/DW_{obs_noise}"
+        obs_noise = float(obs_noise)
 
     elif env_name=="Lotka-Volterra":
         noise_level = 0.2
