@@ -1,0 +1,2 @@
+u_equation,test_drift_mse,test_diffusion_mse
+"[0.0979*laplacian, u_x**2 + u_y**2]",2.625602064654231e-06,0.0
