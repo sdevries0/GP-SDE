@@ -538,8 +538,8 @@ class SPDE_2D:
             laplacian_u = self.laplacian(u)
             diffusion = D * laplacian_u
         else:
-            laplacian_u = 0.0979*self.laplacian(u)
-            diffusion = laplacian_u
+            laplacian_u = 0.0984*self.laplacian(u)
+            diffusion = laplacian_u - 0.0101
         return diffusion
 
     def noise_diffusion(self, x, y, t, u):
@@ -639,8 +639,8 @@ class SPDE_1D:
             reaction = u * (1 - u)
         else:
             laplacian_u = self.laplacian(u)
-            diffusion = D * laplacian_u
-            reaction = u*(0.929 - 0.936*u)
+            diffusion = 0.109 * laplacian_u - 0.0281
+            reaction = 0.987 * u *(0.984 - u)
         return diffusion + reaction
 
     def noise_diffusion(self, x, t, u):
