@@ -99,8 +99,8 @@ if __name__ == '__main__':
     key = jr.PRNGKey(0)
     D = 0.1
     data_key, gp_key = jr.split(key)
-    data = solver.generate_spde_data(data_key, D=D, T=1, n_trajectories=batch_size, save_every=10)
-    test_data = solver.generate_spde_data(jr.PRNGKey(101), D=D, T=1, n_trajectories=4, save_every=10)
+    data = solver.generate_spde_data(data_key, D=D, T=1, n_trajectories=batch_size, save_every=20)
+    test_data = solver.generate_spde_data(jr.PRNGKey(101), D=D, T=1, n_trajectories=4, save_every=20)
     _u, _x, _y, _t = test_data
     target_drift = jax.vmap(solver.drift, in_axes=(0, None))(_u[0], D)
     target_diffusion = jax.vmap(solver.noise_diffusion, in_axes=(None,None,0,0))(_x, _y, _t, _u[0])
