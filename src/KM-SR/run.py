@@ -187,7 +187,7 @@ if __name__ == '__main__':
     batch_size = 8
 
     env_name = sys.argv[1]
-    obs_noise = float(sys.argv[3]) if len(sys.argv)>3 else 0.0
+    obs_noise = sys.argv[3] if len(sys.argv)>3 else 0.0
 
     if env_name=="Double well":
         diffusion_name = sys.argv[2] if len(sys.argv) > 2 else "additive"
@@ -197,6 +197,10 @@ if __name__ == '__main__':
         env = DoubleWell(noise_level, diffusion_name)
         T = 50
         save_path = f"DW_{diffusion_name}"
+
+        if float(obs_noise)>0.0:
+            save_path = f"noise/DW_{obs_noise}"
+        obs_noise = float(obs_noise)
 
     elif env_name=="Lotka-Volterra":
         N_var = 2

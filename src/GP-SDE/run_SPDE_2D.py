@@ -92,7 +92,7 @@ if __name__ == '__main__':
     nx, ny = 16, 16  # Grid points
     Lx, Ly = 4, 4 # Domain size
     dt = 0.001  # Time step
-    batch_size = 4
+    batch_size = 2
 
     solver = SPDE_2D(nx, ny, Lx, Ly, dt)
 
@@ -100,7 +100,7 @@ if __name__ == '__main__':
     D = 0.1
     data_key, gp_key = jr.split(key)
     data = solver.generate_spde_data(data_key, D=D, T=1, n_trajectories=batch_size, save_every=20)
-    test_data = solver.generate_spde_data(jr.PRNGKey(101), D=D, T=1, n_trajectories=1, save_every=20)
+    test_data = solver.generate_spde_data(jr.PRNGKey(101), D=D, T=1, n_trajectories=4, save_every=20)
     _u, _x, _y, _t = test_data
     target_drift = jax.vmap(solver.drift, in_axes=(0, None))(_u[0], D)
     target_diffusion = jax.vmap(solver.noise_diffusion, in_axes=(None,None,0,0))(_x, _y, _t, _u[0])
@@ -112,9 +112,9 @@ if __name__ == '__main__':
     max_nodes = 15
     num_generations = 50
 
-    operator_list = [("+", lambda x, y: jnp.add(x, y), 2, 0.5), 
-                    ("*", lambda x, y: jnp.multiply(x, y), 2, 0.5),
-                    ]
+    operator_list = [{"string": "+", "fn": lambda x, y: jnp.add(x, y), "arity": 2, "prob": 0.5},
+                        {"string": "*", "fn": lambda x, y: jnp.multiply(x, y), "arity": 2, "prob": 0.5}
+                         ]
 
     variable_list = [["u", "u_x", "u_y", "laplacian"]]
 
@@ -122,25 +122,18 @@ if __name__ == '__main__':
     layer_sizes = jnp.array([2])
 
     strategy = GeneticProgramming(fitness_function=fitness_function, num_generations=num_generations, population_size=population_size, operator_list=operator_list, variable_list=variable_list, 
-                                num_populations = num_populations, layer_sizes=layer_sizes, complexity_objective=True, constant_optimization_method="gradient", constant_optimization_steps=15, 
-                                optimize_constants_elite=optimize_constants_elite, max_init_depth=5, constant_step_size_init=0.1, device_type="gpu", max_nodes=max_nodes, punish_duplicates=False)
+                                num_populations = num_populations, layer_sizes=layer_sizes, complexity_objective=True, constant_optimization=True, constant_optimization_steps=15, 
+                                optimize_constants_elite=optimize_constants_elite, max_init_depth=5, constant_step_size=0.1, device_type="gpu", max_nodes=max_nodes, punish_duplicates=False)
 
-    strategy.fit(gp_key, (data), verbose=5)
+    strategy.fit(gp_key, (data), verbose=0)
 
-    u_all, x_all, t_all = data
+    u_all, x_all, y_all, t_all = data
     u_t  = u_all[:, :-1, :]   # shape (n_traj, time_len-1, nx)
     u_tp1 = u_all[:, 1:, :]
 
     # compute NLLs for whole pareto front (vectorized)
-    pareto_front = strategy.pareto_front[1]
-    nlls = jax.vmap(lambda s: compute_nll_for_solution_spde(s, u_t, u_tp1, dt, strategy.tree_evaluator))(pareto_front)
-
-    # combine with complexity (node-count) to form MDL and select best
-    complexities = jax.vmap(lambda s: jnp.sum(s[:,:,0] != 0))(pareto_front)
-    mdl_scores = complexities * jnp.log(len(strategy.node_function_list)-1) + nlls
-
-    best_idx = jnp.argmin(mdl_scores)
-    best_solution = pareto_front[best_idx]
+    pareto_fitness, pareto_front = strategy.pareto_front[0], strategy.pareto_front[1]
+    best_solution = pareto_front[jnp.argmin(pareto_fitness)]
 
     drift_mses, diffusion_mses = validate(
             best_solution, _u[0], target_drift, target_diffusion, strategy.tree_evaluator
@@ -149,13 +142,13 @@ if __name__ == '__main__':
     # Get the equation strings for drift and diffusion
     full_equation = strategy.expression_to_string(best_solution)
 
-    print(f"equation = {full_equation}, drift MSE = {drift_mses[best_idx]}, diffusion MSE = {diffusion_mses[best_idx]}")
+    print(f"equation = {full_equation}, drift MSE = {drift_mses}, diffusion MSE = {diffusion_mses}")
 
     # Store results for this target dimension
     result = {}
     result[f'u_equation'] = full_equation
-    result[f'test_drift_mse'] = float(drift_mses[best_idx])
-    result[f'test_diffusion_mse'] = float(diffusion_mses[best_idx])
+    result[f'test_drift_mse'] = float(drift_mses)
+    result[f'test_diffusion_mse'] = float(diffusion_mses)
 
     # Convert results to DataFrame and save to CSV
     df = pd.DataFrame([result])
